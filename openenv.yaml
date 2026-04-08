@@ -1,0 +1,2 @@
+name: customer-support-env
+entry_point: env.support_env:SupportEnv
