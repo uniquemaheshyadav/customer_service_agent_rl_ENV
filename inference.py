@@ -2,52 +2,49 @@ import os
 from openai import OpenAI
 from env.support_env import SupportEnv
 
-def get_action_from_llm(client, model_name, query, history_actions):
+def get_action_from_llm(client, model_name, state_desc, history_actions):
     """
-    Takes a string query and history of actions, queries the LLM to select ONE action.
-    actions: respond, ask_clarification, escalate, search_kb
-    Returns (action_index, action_string)
+    Queries the LLM to select ONE action based on structured state description.
+    actions: respond, ask_clarification, escalate, search_kb, verify_identity, transfer_to_dept
     """
-    actions = ["respond", "ask_clarification", "escalate", "search_kb"]
+    actions = ["respond", "ask_clarification", "escalate", "search_kb", "verify_identity", "transfer_to_dept"]
     
     prompt = f"""
-You are an AI customer support routing agent.
-Your task is to take a customer's query type and the history of actions already taken, 
-and output EXACTLY ONE OF THE FOLLOWING WORDS as your next action:
-- respond
-- ask_clarification
-- escalate
-- search_kb
+You are an advanced AI Customer Support Agent.
+Your goal is to resolve the customer's issue efficiently and with high satisfaction.
 
-Do not add punctuation, reasoning, or extra text. Only exactly one word from the choices above.
+Allowed Actions:
+- respond: Give a final answer to the customer.
+- ask_clarification: Ask the customer for more details.
+- escalate: Higher-tier support (use for High priority or if stuck).
+- search_kb: Search the Knowledge Base for technical/billing info.
+- verify_identity: Required BEFORE responding to sensitive requests (like refunds).
+- transfer_to_dept: Use for billing-specific queries.
 
-EXAMPLES:
-Query: refund
-Actions taken: []
-Output: escalate
-
-Query: technical_issue
-Actions taken: ['search_kb']
-Output: escalate
-
-Query: general_query
-Actions taken: []
-Output: respond
+STRATEGY:
+1. If it's a 'refund', you MUST 'verify_identity' first.
+2. If it's 'tech', 'search_kb' first to get the solution.
+3. If it's 'billing', 'transfer_to_dept' is the best route.
+4. If sentiment is very low, consider 'escalate' or 'ask_clarification'.
 
 CURRENT STATE:
-Query: {query}
-Actions taken: {history_actions}
+{state_desc}
+
+ACTIONS TAKEN SO FAR:
+{history_actions}
+
+Output ONLY the word of the action you wish to take.
 Output:"""
 
     try:
         response = client.chat.completions.create(
             model=model_name,
             messages=[
-                {"role": "system", "content": "You are a precise classification agent. Output strictly ONE word from the allowed list."},
+                {"role": "system", "content": "You are a logical support routing agent. Output exactly one word from the allowed actions list."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0,
-            max_tokens=10
+            max_tokens=15
         )
         
         raw_output = response.choices[0].message.content.strip().lower()
@@ -77,25 +74,39 @@ def run_episode():
 
     env = SupportEnv()
     obs, info = env.reset()
-    query_str = info["query_str"]
     
-    print(f"[START] task=customer_support env=custom model={model_name}")
+    print(f"[START] task=customer_support env=advanced model={model_name}")
 
     done = False
     step_num = 0
     rewards = []
     success = False
-    
     history_actions = []
+    
+    query_type = info["query_str"]
 
     while not done:
         step_num += 1
         
-        action_idx, action_str = get_action_from_llm(client, model_name, query_str, history_actions)
+        # Construct state description for LLM
+        state_desc = (
+            f"- Query Type: {query_type}\n"
+            f"- Customer Sentiment: {obs['sentiment'][0]:.2f}\n"
+            f"- Priority: {['Low', 'Medium', 'High'][obs['priority']]}\n"
+            f"- Identity Verified: {'Yes' if obs['identity_verified'] else 'No'}\n"
+            f"- KB Info Retrieved: {'Yes' if obs['kb_info_active'] else 'No'}\n"
+        )
+        
+        # Add KB info to state if available
+        if obs['kb_info_active']:
+            state_desc += f"- KB Hit: {info.get('kb_hit', 'N/A')}\n"
+
+        action_idx, action_str = get_action_from_llm(client, model_name, state_desc, history_actions)
         history_actions.append(action_str)
         
         try:
             obs, reward, terminated, truncated, env_info = env.step(action_idx)
+            info = env_info # Update info for next step (e.g. for kb_hit)
             done = terminated or truncated
             error_msg = "null"
         except Exception as e:
@@ -104,7 +115,7 @@ def run_episode():
             error_msg = str(e).replace(' ', '_')
             
         rewards.append(reward)
-        if reward > 0:
+        if reward > 5: # Threshold for success in new environment
             success = True
             
         reward_fmt = f"{reward:.2f}"
