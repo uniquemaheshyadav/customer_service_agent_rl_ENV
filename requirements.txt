@@ -1,3 +1,5 @@
 gymnasium
 openai
 numpy
+fastapi
+uvicorn
